@@ -3,6 +3,7 @@
 #include "csv_report.hpp"
 #include "data_structures.hpp"
 #include "number_theory.hpp"
+#include "timing.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -143,6 +144,12 @@ void testCsvReports() {
     require(fileContains(versioned, "\"comma,value\",\"quote\"\"value\""), "CSV escaping and file output");
     require(fileContains(versioned, "second,row"), "CSV append behavior");
     require(fileContains(base, "keep,this"), "old incompatible history remains intact");
+    bool wrongColumnsRejected = false;
+    try {
+        CsvReport report(versioned, header);
+        report.writeRow(std::vector<std::string>{"one"});
+    } catch (const std::invalid_argument&) { wrongColumnsRejected = true; }
+    require(wrongColumnsRejected, "CSV rejects rows with a mismatched number of columns");
     std::remove(base.c_str()); std::remove(versioned.c_str());
 }
 
@@ -150,10 +157,9 @@ void testDataStructureReport() {
     const std::string path = "tests_data_structures_tmp.csv";
     std::remove(path.c_str());
     std::remove("tests_data_structures_tmp_v2.csv");
-    const std::string actualPath = compatibleReportPath(path,
-        "algorithm,complexity,input_size,pattern,compiler,repetitions,median_ns,min_ns,max_ns,mean_ns,timing_note");
+    const std::string actualPath = compatibleReportPath(path, timing::csvHeader());
     runDataStructureLab(path);
-    require(fileContains(actualPath, "algorithm,complexity,input_size,pattern,compiler,repetitions,median_ns,min_ns,max_ns,mean_ns,timing_note"),
+    require(fileContains(actualPath, timing::csvHeader()),
             "data structure CSV header");
     require(fileContains(actualPath, "std::stack LIFO"), "data structure CSV row");
     std::remove(actualPath.c_str());
@@ -162,9 +168,14 @@ void testDataStructureReport() {
 void testMemoryReport() {
     const std::string path = "tests_memory_tmp.csv";
     std::remove(path.c_str());
+    const std::string header = "run_id,experiment,element_count,repetitions,batch_operations,median_ns_per_vector,min_ns_per_vector,max_ns_per_vector,mean_ns_per_vector,capacity,capacity_changes,payload_bytes,compiler,timing_note";
+    const std::string actualPath = compatibleReportPath(path, header);
     runMemoryExperiment(path, 2000);
-    require(fileContains(path, "vector growth"), "memory report row");
-    std::remove(path.c_str());
+    require(fileContains(actualPath, header), "memory report header");
+    require(fileContains(actualPath, "vector append without reserve") &&
+            fileContains(actualPath, "vector reserve allocation") &&
+            fileContains(actualPath, "vector append after reserve"), "memory report separates reserve and append rows");
+    std::remove(actualPath.c_str());
 }
 
 void runTests() {
@@ -211,6 +222,15 @@ void runTests() {
 
     const Statistics<int> evenStats = summarize(std::vector<int>{8, 2, 4, 6});
     require(evenStats.median == 5 && evenStats.minimum == 2 && evenStats.maximum == 8 && evenStats.mean == 5, "benchmark statistics aggregation");
+    const timing::Summary preciseStats = timing::summarize(std::vector<double>{1.25, 2.5, 3.75, 5.0}, 16);
+    require(preciseStats.median == 3.125 && preciseStats.minimum == 1.25 && preciseStats.maximum == 5.0 &&
+            preciseStats.mean == 3.125 && preciseStats.batchOperations == 16 && !preciseStats.belowResolution,
+            "batched nanosecond statistics preserve fractional precision");
+    require(timing::number(0.000001) == "0.000001", "timing formatter preserves sub-nanosecond precision");
+    const timing::Summary unresolvedStats = timing::summarize(std::vector<double>{0.0, 0.0}, 128, true);
+    require(unresolvedStats.median == 0.0 && unresolvedStats.minimum == 0.0 && unresolvedStats.maximum == 0.0 &&
+            unresolvedStats.mean == 0.0 && unresolvedStats.belowResolution,
+            "below-resolution samples remain zero and are explicitly flagged");
 
     std::vector<std::unique_ptr<DuplicateDetector> > detectors;
     detectors.emplace_back(new BruteForceDuplicates()); detectors.emplace_back(new SortScanDuplicates()); detectors.emplace_back(new HashDuplicates());
@@ -268,40 +288,27 @@ void runTests() {
     std::cout << "All tests passed.\n";
 }
 
-std::string numberText(double value) {
-    std::ostringstream output;
-    output << std::fixed << std::setprecision(2) << value;
-    return output.str();
+void appendTimingRow(CsvReport& report, const std::string& runId, const std::string& experiment,
+                     const std::string& name, const std::string& complexity, std::size_t size,
+                     const std::string& workload, const timing::Summary& stats, int repetitions) {
+    const std::string note = stats.belowResolution
+        ? "one or more total batches were below clock resolution; values are measured ns per operation"
+        : "measured ns per operation; inputs prepared before timing; correctness checked after timing";
+    report.writeRow(std::vector<std::string>{runId, experiment, name, complexity,
+        std::to_string(size), workload, compilerInfo(), std::to_string(repetitions),
+        std::to_string(stats.batchOperations), timing::number(stats.median),
+        timing::number(stats.minimum), timing::number(stats.maximum), timing::number(stats.mean), note});
 }
 
-void appendRow(CsvReport& report, const std::string& name, const std::string& complexity,
-               std::size_t size, const std::string& pattern, const Statistics<long long>& s) {
-    const std::string resolutionNote = s.minimum < 1.0 ? "below clock resolution in at least one sample" : "measured";
-    std::ostringstream count;
-    count << size;
-    report.writeRow(std::vector<std::string>{name, complexity, count.str(), pattern, compilerInfo(), "7",
-        numberText(s.median), numberText(s.minimum), numberText(s.maximum), numberText(s.mean), resolutionNote});
-}
-
-template <typename Fn, typename Consumer>
-Statistics<long long> measure(Fn action, Consumer consume, int repetitions) {
-    typedef typename std::result_of<Fn()>::type Result;
-    std::vector<long long> samples;
-    for (int r = 0; r < repetitions; ++r) {
-        const Clock::time_point start = Clock::now();
-        const Result result = action();
-        const Clock::time_point stop = Clock::now();
-        consume(result); // consume results after the timed section to prevent dead-code elimination
-        samples.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start).count());
-    }
-    return summarize(samples);
+std::size_t cappedBatch(std::size_t operations, std::size_t cap) {
+    return std::max<std::size_t>(1, std::min(operations, cap));
 }
 
 void runBenchmark() {
     const int repetitions = 7;
-    const std::size_t sizes[] = {100, 500, 1500}; // bounded so quadratic algorithms stay practical
+    const std::size_t sizes[] = {256, 1024, 2048};
     const std::string patterns[] = {"random", "sorted", "reverse", "duplicate-heavy"};
-    volatile long long benchmarkSink = 0;
+    volatile unsigned long long benchmarkSink = 0;
     std::vector<std::unique_ptr<SortAlgorithm> > sorters;
     sorters.emplace_back(new BubbleSort()); sorters.emplace_back(new MergeSort()); sorters.emplace_back(new StdSort());
     sorters.emplace_back(new InsertionSort()); sorters.emplace_back(new QuickSort()); sorters.emplace_back(new SelectionSort());
@@ -312,9 +319,10 @@ void runBenchmark() {
     std::vector<std::unique_ptr<SearchAlgorithm> > searches;
     searches.emplace_back(new LinearSearchAlgorithm()); searches.emplace_back(new BinarySearchAlgorithm()); searches.emplace_back(new JumpSearchAlgorithm());
 
-    const std::string header = "algorithm,complexity,input_size,pattern,compiler,repetitions,median_ns,min_ns,max_ns,mean_ns,timing_note";
+    const std::string header = timing::csvHeader();
     const std::string reportPath = compatibleReportPath("benchmark_results.csv", header);
     CsvReport file(reportPath, header);
+    const std::string runId = timing::newRunId();
 
     for (std::size_t si = 0; si < sizeof(sizes)/sizeof(sizes[0]); ++si)
         for (std::size_t pi = 0; pi < sizeof(patterns)/sizeof(patterns[0]); ++pi) {
@@ -322,40 +330,63 @@ void runBenchmark() {
             std::vector<int> expected(input); std::sort(expected.begin(), expected.end());
             const int target = input.empty() ? 0 : input[input.size() / 2];
             for (std::size_t a = 0; a < searches.size(); ++a) {
-                // Both search implementations receive the same ascending vector.
+                // All search implementations receive the same prepared ascending vector.
                 const std::vector<int>& searchInput = expected;
                 const std::vector<int>::const_iterator found = std::find(searchInput.begin(), searchInput.end(), target);
                 const int expectedIndex = found == searchInput.end() ? -1 : static_cast<int>(found - searchInput.begin());
                 if (searches[a]->find(searchInput, target) != expectedIndex) throw std::runtime_error("Search correctness failed");
-                const int measuredIndex = expectedIndex;
-                const Statistics<long long> stats = measure(
-                    [&]() { return searches[a]->find(searchInput, target); },
-                    [&](int result) { if (result != measuredIndex) throw std::runtime_error("Search failed during measurement"); benchmarkSink += result; }, repetitions);
-                appendRow(file, searches[a]->name(), searches[a]->complexity(), input.size(), "sorted-search-view", stats);
+                const std::size_t maxBatch = cappedBatch(8192, 2000000 / std::max<std::size_t>(1, input.size()));
+                const timing::Summary stats = timing::measureAdaptive([&](std::size_t batch) {
+                    std::vector<int> results(batch);
+                    const Clock::time_point start = Clock::now();
+                    for (std::size_t i = 0; i < batch; ++i) results[i] = searches[a]->find(searchInput, target);
+                    const Clock::time_point stop = Clock::now();
+                    unsigned long long checksum = 0;
+                    for (std::size_t i = 0; i < batch; ++i) {
+                        if (results[i] != expectedIndex) throw std::runtime_error("Search result changed during measurement");
+                        checksum += static_cast<unsigned int>(results[i] + 1);
+                    }
+                    benchmarkSink += checksum;
+                    return timing::elapsedNanoseconds(start, stop);
+                }, repetitions, maxBatch);
+                appendTimingRow(file, runId, "algorithm benchmark", searches[a]->name(), searches[a]->complexity(),
+                                input.size(), patterns[pi] + "; sorted search view", stats, repetitions);
             }
             std::string fastestName;
             double fastestMedian = 0.0;
             for (std::size_t a = 0; a < sorters.size(); ++a) {
                 std::vector<int> check(input); sorters[a]->sort(check);
                 if (check != expected) throw std::runtime_error(sorters[a]->name() + " correctness check failed");
-                // Copy and verify outside timing so each sorter receives identical data.
-                std::vector<long long> samples;
-                for (int r = 0; r < repetitions; ++r) {
-                    std::vector<int> copy(input);
-                    const Clock::time_point start = Clock::now(); sorters[a]->sort(copy); const Clock::time_point stop = Clock::now();
-                    if (copy != expected) throw std::runtime_error("Sort output changed during benchmark");
-                    samples.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count());
-                }
-                const Statistics<long long> actual = summarize(samples);
-                appendRow(file, sorters[a]->name(), sorters[a]->complexity(), input.size(), patterns[pi], actual);
+                const bool quadratic = sorters[a]->name() == "Bubble Sort" ||
+                    sorters[a]->name() == "Insertion Sort" || sorters[a]->name() == "Selection Sort";
+                const std::size_t nSquared = input.size() * input.size();
+                std::size_t maxBatch = quadratic
+                    ? cappedBatch(128, 8000000 / std::max<std::size_t>(1, nSquared)) : 128;
+                if (patterns[pi] == "sorted" && sorters[a]->name() != "Selection Sort") maxBatch = 128;
+                const timing::Summary actual = timing::measureAdaptive([&](std::size_t batch) {
+                    std::vector<std::vector<int> > copies(batch, input);
+                    const Clock::time_point start = Clock::now();
+                    for (std::size_t i = 0; i < batch; ++i) sorters[a]->sort(copies[i]);
+                    const Clock::time_point stop = Clock::now();
+                    unsigned long long checksum = 0;
+                    for (std::size_t i = 0; i < batch; ++i) {
+                        if (copies[i] != expected) throw std::runtime_error("Sort output changed during measurement");
+                        if (!copies[i].empty()) checksum += static_cast<unsigned int>(copies[i][i % copies[i].size()]);
+                    }
+                    benchmarkSink += checksum;
+                    return timing::elapsedNanoseconds(start, stop);
+                }, repetitions, maxBatch);
+                appendTimingRow(file, runId, "algorithm benchmark", sorters[a]->name(), sorters[a]->complexity(),
+                                input.size(), patterns[pi], actual, repetitions);
                 if (fastestName.empty() || actual.median < fastestMedian) {
                     fastestName = sorters[a]->name(); fastestMedian = actual.median;
                 }
                 std::cout << sorters[a]->name() << " n=" << input.size() << " " << patterns[pi]
-                            << " median=" << actual.median << " ns, min=" << actual.minimum
-                            << ", max=" << actual.maximum << ", mean=" << actual.mean << "\n";
+                            << " batch=" << actual.batchOperations << " median=" << timing::number(actual.median)
+                            << " ns/op, min=" << timing::number(actual.minimum) << ", max="
+                            << timing::number(actual.maximum) << ", mean=" << timing::number(actual.mean) << "\n";
                 if (a + 1 == sorters.size())
-                    std::cout << "  Fastest sort for this input: " << fastestName << " (median " << fastestMedian << " ns)\n";
+                    std::cout << "  Fastest sort for this input: " << fastestName << " (median " << timing::number(fastestMedian) << " ns/op)\n";
             }
             bool expectedDuplicate = false;
             for (std::size_t i = 0; i < input.size() && !expectedDuplicate; ++i)
@@ -363,41 +394,109 @@ void runBenchmark() {
             for (std::size_t a = 0; a < detectors.size(); ++a) {
                 if (detectors[a]->containsDuplicate(input) != expectedDuplicate) throw std::runtime_error("Duplicate detection correctness failed");
                 const bool expectedResult = expectedDuplicate;
-                const Statistics<long long> stats = measure(
-                    [&]() { return detectors[a]->containsDuplicate(input); },
-                    [&](bool result) { if (result != expectedResult) throw std::runtime_error("Duplicate check failed during measurement"); benchmarkSink += result ? 1 : 0; }, repetitions);
-                appendRow(file, detectors[a]->name(), detectors[a]->complexity(), input.size(), patterns[pi], stats);
+                const std::size_t maxBatch = detectors[a]->name() == "Duplicate brute force"
+                    ? cappedBatch(64, 1000000 / std::max<std::size_t>(1, input.size() * input.size())) : 128;
+                const timing::Summary stats = timing::measureAdaptive([&](std::size_t batch) {
+                    std::vector<unsigned char> results(batch);
+                    const Clock::time_point start = Clock::now();
+                    for (std::size_t i = 0; i < batch; ++i)
+                        results[i] = detectors[a]->containsDuplicate(input) ? 1 : 0;
+                    const Clock::time_point stop = Clock::now();
+                    unsigned long long checksum = 0;
+                    for (std::size_t i = 0; i < batch; ++i) {
+                        if ((results[i] != 0) != expectedResult) throw std::runtime_error("Duplicate check failed during measurement");
+                        checksum += results[i];
+                    }
+                    benchmarkSink += checksum;
+                    return timing::elapsedNanoseconds(start, stop);
+                }, repetitions, maxBatch);
+                appendTimingRow(file, runId, "algorithm benchmark", detectors[a]->name(), detectors[a]->complexity(),
+                                input.size(), patterns[pi], stats, repetitions);
             }
             const std::vector<std::pair<int, std::size_t> > expectedCounts = MapFrequencyCounter().count(input);
             for (std::size_t a = 0; a < counters.size(); ++a) {
                 if (normalizeCounts(counters[a]->count(input)) != normalizeCounts(expectedCounts)) throw std::runtime_error("Frequency correctness failed");
-                const Statistics<long long> stats = measure(
-                    [&]() { return counters[a]->count(input); },
-                    [&](const std::vector<std::pair<int, std::size_t> >& result) {
-                        if (normalizeCounts(result) != normalizeCounts(expectedCounts)) throw std::runtime_error("Frequency failed during measurement");
-                        for (std::size_t i = 0; i < result.size(); ++i) benchmarkSink += static_cast<long long>(result[i].second);
-                    }, repetitions);
-                appendRow(file, counters[a]->name(), counters[a]->complexity(), input.size(), patterns[pi], stats);
+                const std::size_t maxBatch = cappedBatch(128, 200000 / std::max<std::size_t>(1, input.size()));
+                const timing::Summary stats = timing::measureAdaptive([&](std::size_t batch) {
+                    std::vector<std::vector<std::pair<int, std::size_t> > > results(batch);
+                    const Clock::time_point start = Clock::now();
+                    for (std::size_t i = 0; i < batch; ++i) results[i] = counters[a]->count(input);
+                    const Clock::time_point stop = Clock::now();
+                    unsigned long long checksum = 0;
+                    for (std::size_t i = 0; i < batch; ++i) {
+                        if (normalizeCounts(results[i]) != normalizeCounts(expectedCounts))
+                            throw std::runtime_error("Frequency failed during measurement");
+                        for (std::size_t j = 0; j < results[i].size(); ++j) checksum += results[i][j].second;
+                    }
+                    benchmarkSink += checksum;
+                    return timing::elapsedNanoseconds(start, stop);
+                }, repetitions, maxBatch);
+                appendTimingRow(file, runId, "algorithm benchmark", counters[a]->name(), counters[a]->complexity(),
+                                input.size(), patterns[pi], stats, repetitions);
             }
         }
-    std::cout << "Benchmark history appended to " << reportPath << "\n";
+    std::cout << "Benchmark run " << runId << " appended to " << reportPath
+              << " (compatible schema; prior rows preserved).\n";
     file.flush();
     (void)benchmarkSink;
 }
 
 void runMemoryExperiment(const std::string& reportPath, std::size_t count) {
-    std::vector<int> growing, reserved;
-    Clock::time_point start = Clock::now();
-    for (std::size_t i = 0; i < count; ++i) growing.push_back(static_cast<int>(i));
-    Clock::time_point stop = Clock::now();
-    const long long growthNs = std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count();
-    reserved.reserve(count);
-    start = Clock::now();
-    for (std::size_t i = 0; i < count; ++i) reserved.push_back(static_cast<int>(i));
-    stop = Clock::now();
-    const long long reservedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count();
-    volatile int memorySink = growing.empty() || reserved.empty() ? 0 : growing.back() + reserved.back();
+    if (count == 0) throw std::invalid_argument("Memory experiment count must be positive");
+    const std::size_t bytesPerVector = count * sizeof(int);
+    const std::size_t maxBatch = cappedBatch(128, (64u * 1024u * 1024u) / std::max<std::size_t>(1, bytesPerVector));
+    const int repetitions = 7;
+    const std::string runId = timing::newRunId();
+    volatile unsigned long long memorySink = 0;
+
+    const timing::Summary growth = timing::measureAdaptive([&](std::size_t batch) {
+        std::vector<std::vector<int> > values(batch);
+        const Clock::time_point start = Clock::now();
+        for (std::size_t b = 0; b < batch; ++b)
+            for (std::size_t i = 0; i < count; ++i) values[b].push_back(static_cast<int>(i));
+        const Clock::time_point stop = Clock::now();
+        unsigned long long checksum = 0;
+        for (std::size_t b = 0; b < batch; ++b) {
+            if (values[b].size() != count || values[b].back() != static_cast<int>(count - 1))
+                throw std::runtime_error("Vector growth workload correctness failure");
+            checksum += values[b].back();
+        }
+        memorySink += checksum;
+        return timing::elapsedNanoseconds(start, stop);
+    }, repetitions, maxBatch);
+
+    const timing::Summary reserveTiming = timing::measureAdaptive([&](std::size_t batch) {
+        std::vector<std::vector<int> > values(batch);
+        const Clock::time_point start = Clock::now();
+        for (std::size_t b = 0; b < batch; ++b) values[b].reserve(count);
+        const Clock::time_point stop = Clock::now();
+        unsigned long long checksum = 0;
+        for (std::size_t b = 0; b < batch; ++b) {
+            if (values[b].capacity() < count) throw std::runtime_error("vector::reserve failed to provide requested capacity");
+            checksum += values[b].capacity();
+        }
+        memorySink += checksum;
+        return timing::elapsedNanoseconds(start, stop);
+    }, repetitions, maxBatch);
+
+    const timing::Summary reservedAppend = timing::measureAdaptive([&](std::size_t batch) {
+        std::vector<std::vector<int> > values(batch);
+        for (std::size_t b = 0; b < batch; ++b) values[b].reserve(count);
+        const Clock::time_point start = Clock::now();
+        for (std::size_t b = 0; b < batch; ++b)
+            for (std::size_t i = 0; i < count; ++i) values[b].push_back(static_cast<int>(i));
+        const Clock::time_point stop = Clock::now();
+        unsigned long long checksum = 0;
+        for (std::size_t b = 0; b < batch; ++b) {
+            if (values[b].size() != count || values[b].back() != static_cast<int>(count - 1))
+                throw std::runtime_error("Reserved vector workload correctness failure");
+            checksum += values[b].back();
+        }
+        memorySink += checksum;
+        return timing::elapsedNanoseconds(start, stop);
+    }, repetitions, maxBatch);
     (void)memorySink;
+
     std::size_t growthChanges = 0, previousCapacity = 0;
     std::vector<int> growthProbe;
     for (std::size_t i = 0; i < count; ++i) {
@@ -407,29 +506,29 @@ void runMemoryExperiment(const std::string& reportPath, std::size_t count) {
     std::vector<int> reserveProbe;
     reserveProbe.reserve(count);
     const std::size_t reservedCapacity = reserveProbe.capacity();
-    for (std::size_t i = 0; i < count; ++i) reserveProbe.push_back(static_cast<int>(i));
-    const std::size_t reservedChanges = reserveProbe.capacity() == reservedCapacity ? 0 : 1;
-    const std::string header = "experiment,element_count,insertion_ns,capacity,capacity_changes,payload_bytes,compiler,timing_note";
+    const std::string header = "run_id,experiment,element_count,repetitions,batch_operations,median_ns_per_vector,min_ns_per_vector,max_ns_per_vector,mean_ns_per_vector,capacity,capacity_changes,payload_bytes,compiler,timing_note";
     const std::string actualPath = compatibleReportPath(reportPath, header);
     CsvReport csv(actualPath, header);
-    const std::string note = (growthNs == 0 || reservedNs == 0
-        ? "at least one timing below clock resolution; reserve call excluded; payload bytes exclude allocator overhead"
-        : "reserve call excluded; payload bytes exclude allocator overhead");
-    csv.writeRow(std::vector<std::string>{"vector growth", std::to_string(count), std::to_string(growthNs),
-        std::to_string(growing.capacity()), std::to_string(growthChanges),
-        std::to_string(growing.capacity() * sizeof(int)), compilerInfo(), note});
-    csv.writeRow(std::vector<std::string>{"vector with reserve", std::to_string(count), std::to_string(reservedNs),
-        std::to_string(reserved.capacity()), std::to_string(reservedChanges),
-        std::to_string(reserved.capacity() * sizeof(int)), compilerInfo(), note});
+    const std::string estimate = "payload estimate is capacity*sizeof(int), excludes allocator overhead; each value is ns per vector operation";
+    const std::string growthNote = estimate + (growth.belowResolution ? "; below clock resolution in some batches" : "");
+    const std::string reserveNote = estimate + (reserveTiming.belowResolution ? "; below clock resolution in some batches" : "");
+    const std::string appendNote = estimate + (reservedAppend.belowResolution ? "; below clock resolution in some batches" : "");
+    const std::size_t reserveChanges = reservedCapacity > 0 ? 1 : 0;
+    const auto writeMemoryRow = [&](const std::string& name, const timing::Summary& stats,
+                                    std::size_t capacity, std::size_t changes, const std::string& note) {
+        csv.writeRow(std::vector<std::string>{runId, name, std::to_string(count), std::to_string(repetitions),
+            std::to_string(stats.batchOperations), timing::number(stats.median), timing::number(stats.minimum),
+            timing::number(stats.maximum), timing::number(stats.mean), std::to_string(capacity),
+            std::to_string(changes), std::to_string(capacity * sizeof(int)), compilerInfo(), note});
+    };
+    writeMemoryRow("vector append without reserve", growth, growthProbe.capacity(), growthChanges, growthNote);
+    writeMemoryRow("vector reserve allocation", reserveTiming, reservedCapacity, reserveChanges, reserveNote);
+    writeMemoryRow("vector append after reserve", reservedAppend, reservedCapacity, 0, appendNote);
     csv.flush();
-    std::cout << "vector push_back " << count << " ints: growth=" << growthNs << " ns, reserve=" << reservedNs
-              << " ns\nCapacity: growth=" << growing.capacity() << " ints (" << growing.capacity() * sizeof(int)
-              << " payload bytes), reserve=" << reserved.capacity() << " ints (" << reserved.capacity() * sizeof(int)
-              << " payload bytes)\nCapacity changes during append: growth=" << growthChanges
-              << ", reserve=" << reservedChanges
-              << ". Byte counts estimate element storage only; allocator overhead and peak resident memory are not measured.\n"
-              << "Memory report saved to " << actualPath << "\n";
-    if (growthNs == 0 || reservedNs == 0) std::cout << "At least one insertion timing fell below the clock resolution.\n";
+    std::cout << "Memory run " << runId << ": median ns/vector (" << count << " appends) growth="
+              << timing::number(growth.median) << ", reserve() allocation=" << timing::number(reserveTiming.median)
+              << ", append after reserve=" << timing::number(reservedAppend.median)
+              << ". Capacity payload estimates exclude allocator overhead. Report appended to " << actualPath << ".\n";
 }
 
 void runMemoryExperiment() { runMemoryExperiment("memory_results.csv", 100000); }

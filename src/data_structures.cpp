@@ -1,5 +1,6 @@
 #include "data_structures.hpp"
 #include "csv_report.hpp"
+#include "timing.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -20,33 +21,22 @@
 
 namespace turbocore {
 namespace {
-typedef std::chrono::steady_clock Clock;
-struct Summary { double median, minimum, maximum, mean; };
-
-Summary summarize(std::vector<long long> values) {
-    std::sort(values.begin(), values.end());
-    Summary result;
-    result.minimum = static_cast<double>(values.front());
-    result.maximum = static_cast<double>(values.back());
-    result.median = static_cast<double>(values[values.size()/2]);
-    if (values.size() % 2 == 0) result.median = (values[values.size()/2-1] + result.median) / 2.0;
-    double total = 0;
-    for (std::size_t i = 0; i < values.size(); ++i) total += values[i];
-    result.mean = total / values.size();
-    return result;
-}
-
 template <typename Fn>
-Summary measure(Fn workload, unsigned long long expected) {
-    std::vector<long long> samples;
-    for (int i = 0; i < 7; ++i) {
-        const Clock::time_point start = Clock::now();
-        const unsigned long long actual = workload();
-        const Clock::time_point stop = Clock::now();
-        if (actual != expected) throw std::runtime_error("Data structure workload returned an incorrect result");
-        samples.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count());
-    }
-    return summarize(samples);
+timing::Summary measure(Fn workload, unsigned long long expected, std::size_t maxBatch) {
+    volatile unsigned long long sink = 0;
+    return timing::measureAdaptive([&](std::size_t batch) {
+        std::vector<unsigned long long> results(batch);
+        const timing::Clock::time_point start = timing::Clock::now();
+        for (std::size_t i = 0; i < batch; ++i) results[i] = workload();
+        const timing::Clock::time_point stop = timing::Clock::now();
+        unsigned long long checksum = 0;
+        for (std::size_t i = 0; i < batch; ++i) {
+            if (results[i] != expected) throw std::runtime_error("Data structure workload returned an incorrect result");
+            checksum += results[i];
+        }
+        sink += checksum;
+        return timing::elapsedNanoseconds(start, stop);
+    }, 7, maxBatch);
 }
 
 std::string compiler() {
@@ -57,18 +47,18 @@ std::string compiler() {
 #endif
 }
 
-void report(CsvReport& csv, const std::string& name, const std::string& complexity,
-            const Summary& s, std::size_t count) {
-    std::ostringstream n, median, minimum, maximum, mean;
-    n << count;
-    median << std::fixed << std::setprecision(2) << s.median;
-    minimum << std::fixed << std::setprecision(2) << s.minimum;
-    maximum << std::fixed << std::setprecision(2) << s.maximum;
-    mean << std::fixed << std::setprecision(2) << s.mean;
-    csv.writeRow(std::vector<std::string>{name, complexity, n.str(), "fixed-seed operation workload", compiler(), "7",
-        median.str(), minimum.str(), maximum.str(), mean.str(), s.minimum < 1 ? "below clock resolution in at least one sample" : "measured"});
-    std::cout << name << ": median " << median.str() << " ns, min " << minimum.str()
-              << " ns, max " << maximum.str() << " ns, mean " << mean.str() << " ns\n";
+void report(CsvReport& csv, const std::string& runId, const std::string& name, const std::string& complexity,
+            const timing::Summary& s, std::size_t count) {
+    const std::string note = s.belowResolution
+        ? "one or more total batches below clock resolution; measured ns per workload"
+        : "measured ns per workload; fixed-seed inputs prepared before timing; correctness checked after timing";
+    csv.writeRow(std::vector<std::string>{runId, "data structure lab", name, complexity,
+        std::to_string(count), "fixed-seed; same operation sequence per pair", compiler(), "7",
+        std::to_string(s.batchOperations), timing::number(s.median), timing::number(s.minimum),
+        timing::number(s.maximum), timing::number(s.mean), note});
+    std::cout << name << ": batch=" << s.batchOperations << ", median " << timing::number(s.median)
+              << " ns/workload, min " << timing::number(s.minimum) << ", max "
+              << timing::number(s.maximum) << ", mean " << timing::number(s.mean) << "\n";
 }
 
 class BinarySearchTree {
@@ -179,9 +169,11 @@ void testDataStructures() {
 }
 
 void runDataStructureLab(const std::string& reportPath) {
-    const std::string header = "algorithm,complexity,input_size,pattern,compiler,repetitions,median_ns,min_ns,max_ns,mean_ns,timing_note";
+    const std::string header = timing::csvHeader();
     CsvReport csv(compatibleReportPath(reportPath, header), header);
+    const std::string runId = timing::newRunId();
     const std::size_t count = 2000;
+    const std::size_t maxBatch = 1024;
     std::vector<int> values(count);
     std::iota(values.begin(), values.end(), 0);
     std::mt19937 random(445566u);
@@ -190,27 +182,27 @@ void runDataStructureLab(const std::string& reportPath) {
 
     const unsigned long long stackExpected = runStack<std::stack<int> >(values);
     if (runVectorStack(values) != stackExpected) throw std::runtime_error("Stack/vector LIFO preflight failed");
-    report(csv, "std::stack LIFO", "O(1) amortized push/pop", measure([&]() { return runStack<std::stack<int> >(values); }, stackExpected), count);
-    report(csv, "reserved vector LIFO", "O(1) amortized push/pop", measure([&]() { return runVectorStack(values); }, stackExpected), count);
+    report(csv, runId, "std::stack LIFO", "O(1) amortized push/pop", measure([&]() { return runStack<std::stack<int> >(values); }, stackExpected, maxBatch), count);
+    report(csv, runId, "reserved vector LIFO", "O(1) amortized push/pop", measure([&]() { return runVectorStack(values); }, stackExpected, maxBatch), count);
 
     const unsigned long long queueExpected = runQueue<std::queue<int> >(values);
     if (runDequeQueue(values) != queueExpected) throw std::runtime_error("Queue/deque FIFO preflight failed");
-    report(csv, "std::queue enqueue/dequeue", "O(1) typical operations", measure([&]() { return runQueue<std::queue<int> >(values); }, queueExpected), count);
-    report(csv, "std::deque enqueue/dequeue", "O(1) typical operations", measure([&]() { return runDequeQueue(values); }, queueExpected), count);
+    report(csv, runId, "std::queue enqueue/dequeue", "O(1) typical operations", measure([&]() { return runQueue<std::queue<int> >(values); }, queueExpected, maxBatch), count);
+    report(csv, runId, "std::deque enqueue/dequeue", "O(1) typical operations", measure([&]() { return runDequeQueue(values); }, queueExpected, maxBatch), count);
 
     const unsigned long long listExpected = runListWork(values, target);
     if (runVectorWork(values, target) != listExpected) throw std::runtime_error("List/vector find-erase preflight failed");
-    report(csv, "std::list append/find/erase", "O(n) build/search, O(1) erase", measure([&]() { return runListWork(values, target); }, listExpected), count);
-    report(csv, "std::vector append/find/erase", "O(n) build/search/erase", measure([&]() { return runVectorWork(values, target); }, listExpected), count);
+    report(csv, runId, "std::list append/find/erase", "O(n) build/search, O(1) erase", measure([&]() { return runListWork(values, target); }, listExpected, maxBatch), count);
+    report(csv, runId, "std::vector append/find/erase", "O(n) build/search/erase", measure([&]() { return runVectorWork(values, target); }, listExpected, maxBatch), count);
 
     const std::vector<int> queries(values.begin(), values.begin() + 250);
     const unsigned long long treeExpected = runTree<BinarySearchTree>(values, queries);
     if (runTree<SetTree>(values, queries) != treeExpected) throw std::runtime_error("BST/set preflight failed");
-    report(csv, "unbalanced BST insert/search", "O(log n) average, O(n) worst", measure([&]() { return runTree<BinarySearchTree>(values, queries); }, treeExpected), count);
-    report(csv, "std::set insert/search", "O(log n) operations", measure([&]() { return runTree<SetTree>(values, queries); }, treeExpected), count);
+    report(csv, runId, "unbalanced BST insert/search", "O(log n) average, O(n) worst", measure([&]() { return runTree<BinarySearchTree>(values, queries); }, treeExpected, maxBatch), count);
+    report(csv, runId, "std::set insert/search", "O(log n) operations", measure([&]() { return runTree<SetTree>(values, queries); }, treeExpected, maxBatch), count);
     csv.flush();
-    std::cout << "Data structure report saved to " << csv.path()
-              << ". Comparisons include container setup and destruction; allocator and implementation details affect results.\n";
+    std::cout << "Data structure run " << runId << " appended to " << csv.path()
+              << ". Timings include workload setup and teardown; allocator and implementation details affect results.\n";
 }
 
 } // namespace turbocore

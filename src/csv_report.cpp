@@ -44,7 +44,10 @@ std::string csvEscape(const std::string& value) {
 }
 
 CsvReport::CsvReport(const std::string& path, const std::string& header)
-    : path_(path), header_(header) {
+    : path_(path), header_(header), columnCount_(1) {
+    for (std::size_t i = 0; i < header_.size(); ++i)
+        if (header_[i] == ',') ++columnCount_;
+    if (header_.empty()) throw std::invalid_argument("CSV header cannot be empty");
     std::string firstLine;
     bool exists = false;
     const bool hasHeader = readFirstLine(path_, firstLine, exists);
@@ -59,6 +62,8 @@ CsvReport::CsvReport(const std::string& path, const std::string& header)
 }
 
 void CsvReport::writeRow(const std::vector<std::string>& cells) {
+    if (cells.size() != columnCount_)
+        throw std::invalid_argument("CSV row column count does not match header in " + path_);
     for (std::size_t i = 0; i < cells.size(); ++i) {
         if (i) stream_ << ',';
         stream_ << csvEscape(cells[i]);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -17,6 +18,7 @@ public:
 private:
     std::string path_;
     std::string header_;
+    std::size_t columnCount_;
     std::ofstream stream_;
 };
 
