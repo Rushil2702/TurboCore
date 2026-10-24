@@ -1,6 +1,7 @@
 #include "big_integer.hpp"
 
 #include <algorithm>
+#include <istream>
 #include <ostream>
 #include <stdexcept>
 
@@ -107,6 +108,18 @@ bool BigInteger::operator<(const BigInteger& other) const {
     return negative_ ? magnitude > 0 : magnitude < 0;
 }
 bool BigInteger::operator>(const BigInteger& other) const { return other < *this; }
+
+std::istream& operator>>(std::istream& input, BigInteger& value) {
+    std::string token;
+    if (!(input >> token)) return input;
+    try {
+        BigInteger parsed(token);
+        value = parsed;
+    } catch (const std::invalid_argument&) {
+        input.setstate(std::ios::failbit);
+    }
+    return input;
+}
 
 std::ostream& operator<<(std::ostream& output, const BigInteger& value) {
     if (value.negative_) output << '-';

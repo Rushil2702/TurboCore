@@ -17,6 +17,7 @@ public:
     bool operator!=(const BigInteger& other) const;
     bool operator<(const BigInteger& other) const;
     bool operator>(const BigInteger& other) const;
+    friend std::istream& operator>>(std::istream& input, BigInteger& value);
     friend std::ostream& operator<<(std::ostream& output, const BigInteger& value);
 
 private:
