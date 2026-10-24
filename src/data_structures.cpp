@@ -49,16 +49,21 @@ std::string compiler() {
 
 void report(CsvReport& csv, const std::string& runId, const std::string& name, const std::string& complexity,
             const timing::Summary& s, std::size_t count) {
-    const std::string note = s.belowResolution
-        ? "one or more total batches below clock resolution; measured ns per workload"
-        : "measured ns per workload; fixed-seed inputs prepared before timing; correctness checked after timing";
+    std::ostringstream note;
+    note << (s.reliable ? "reliable sample set" : "UNRELIABLE comparison")
+        << "; unresolved samples=" << s.unresolvedSamples
+        << "; all measured batches met target=" << (s.targetReached ? "true" : "false")
+        << "; fixed-seed inputs; correctness checked outside timed region";
     csv.writeRow(std::vector<std::string>{runId, "data structure lab", name, complexity,
         std::to_string(count), "fixed-seed; same operation sequence per pair", compiler(), "7",
-        std::to_string(s.batchOperations), timing::number(s.median), timing::number(s.minimum),
-        timing::number(s.maximum), timing::number(s.mean), note});
+        std::to_string(s.batchOperations), timing::number(s.targetBatchNanoseconds), timing::number(s.median), timing::number(s.minimum),
+        timing::number(s.maximum), timing::number(s.mean), std::to_string(s.unresolvedSamples),
+        s.reliable ? "true" : "false", timing::methodVersion, note.str()});
     std::cout << name << ": batch=" << s.batchOperations << ", median " << timing::number(s.median)
-              << " ns/workload, min " << timing::number(s.minimum) << ", max "
-              << timing::number(s.maximum) << ", mean " << timing::number(s.mean) << "\n";
+                << " ns/workload, min " << timing::number(s.minimum) << ", max "
+                << timing::number(s.maximum) << ", mean " << timing::number(s.mean)
+                << (s.reliable ? " [reliable samples]" : " [UNRELIABLE comparison]")
+                << ", unresolved samples=" << s.unresolvedSamples << "\n";
 }
 
 class BinarySearchTree {
@@ -202,7 +207,7 @@ void runDataStructureLab(const std::string& reportPath) {
     report(csv, runId, "std::set insert/search", "O(log n) operations", measure([&]() { return runTree<SetTree>(values, queries); }, treeExpected, maxBatch), count);
     csv.flush();
     std::cout << "Data structure run " << runId << " appended to " << csv.path()
-              << ". Timings include workload setup and teardown; allocator and implementation details affect results.\n";
+                << ". Timings include workload setup and teardown; allocator and implementation details affect results.\n";
 }
 
 } // namespace turbocore
