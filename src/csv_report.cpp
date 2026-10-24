@@ -33,6 +33,16 @@ std::string compatibleReportPath(const std::string& preferredPath, const std::st
     throw std::runtime_error("Could not find a compatible CSV report filename");
 }
 
+std::vector<std::string> reportSeriesPaths(const std::string& basePath) {
+    std::vector<std::string> paths;
+    for (unsigned int version = 1; version < 1000; ++version) {
+        const std::string candidate = version == 1 ? basePath : numberedPath(basePath, version);
+        std::ifstream input(candidate.c_str());
+        if (input.good()) paths.push_back(candidate);
+    }
+    return paths;
+}
+
 std::string csvEscape(const std::string& value) {
     bool quote = false;
     std::string escaped;

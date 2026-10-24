@@ -8,6 +8,7 @@
 namespace turbocore {
 
 std::string compatibleReportPath(const std::string& preferredPath, const std::string& header);
+std::vector<std::string> reportSeriesPaths(const std::string& basePath);
 
 class CsvReport {
 public:
