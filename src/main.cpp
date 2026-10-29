@@ -595,6 +595,54 @@ void runSearchDemo() {
     else std::cout << algorithm->name() << " found the value at index " << index << ".\n";
 }
 
+
+void runSortingDemo() {
+    std::vector<int> values = readValues();
+
+    if (values.empty()) {
+        std::cout << "No numbers entered.\n";
+        return;
+    }
+
+    std::cout << "\nChoose sorting algorithm:\n"
+              << "1. Bubble Sort\n"
+              << "2. Insertion Sort\n"
+              << "3. Merge Sort\n"
+              << "4. Quick Sort\n"
+              << "5. Selection Sort\n"
+              << "6. std::sort\n"
+              << "Choice: ";
+
+    std::string choice;
+    if (!std::getline(std::cin, choice))
+        throw std::runtime_error("Input ended unexpectedly");
+
+    std::unique_ptr<SortAlgorithm> algorithm;
+
+    if (choice == "1") algorithm.reset(new BubbleSort());
+    else if (choice == "2") algorithm.reset(new InsertionSort());
+    else if (choice == "3") algorithm.reset(new MergeSort());
+    else if (choice == "4") algorithm.reset(new QuickSort());
+    else if (choice == "5") algorithm.reset(new SelectionSort());
+    else if (choice == "6") algorithm.reset(new StdSort());
+    else throw std::invalid_argument("Choose a number from 1 to 6");
+
+    const Clock::time_point start = Clock::now();
+    algorithm->sort(values);
+    const Clock::time_point stop = Clock::now();
+
+    std::cout << "\nAlgorithm: " << algorithm->name() << '\n';
+    std::cout << "Sorted array: ";
+
+    for (std::size_t i = 0; i < values.size(); ++i)
+        std::cout << values[i] << (i + 1 == values.size() ? '\n' : ' ');
+
+    std::cout << "Time taken: "
+              << std::chrono::duration<double, std::micro>(stop - start).count()
+              << " microseconds\n";
+}
+
+
 void runBigIntegerDemo() {
     std::string left, operation, right;
     std::cout << "First integer: "; if (!std::getline(std::cin, left)) throw std::runtime_error("Input ended unexpectedly");
@@ -634,7 +682,9 @@ void runNumberTheory(const std::string& operation, const std::string& first, con
 void interactiveMenu() {
     for (;;) {
         std::cout << "\nTurboCore\n1. Tests\n2. Benchmark\n3. Memory experiment\n4. Show benchmark history\n"
-                        "5. Search demo\n6. BigInteger calculator\n7. Number theory\n8. Data structure lab\n9. Algorithm catalog\n0. Exit\nChoice: ";
+                        "5. Search demo\n6. BigInteger calculator\n7. Number theory\n"
+                        "8. Data structure lab\n9. Algorithm catalog\n"
+                        "10. Sorting demo\n0. Exit\nChoice: ";
         std::string choice;
         if (!std::getline(std::cin, choice)) return;
         if (choice == "0") return;
@@ -654,7 +704,8 @@ void interactiveMenu() {
             }
             else if (choice == "8") runDataStructureLab("data_structure_results.csv");
             else if (choice == "9") showAlgorithmCatalog();
-            else std::cout << "Invalid choice. Enter a number from 0 to 9.\n";
+            else if (choice == "10") runSortingDemo();
+            else std::cout << "Invalid choice. Enter a valid menu option.\n";
         } catch (const std::exception& error) { std::cerr << "Error: " << error.what() << '\n'; }
     }
 }
